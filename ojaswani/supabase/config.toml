@@ -1,0 +1,7 @@
+project_id = "uufmfszjpyhvhacymlka"
+
+[functions.generate-recommendations]
+verify_jwt = false
+
+[functions.alpha-vantage-proxy]
+verify_jwt = false
