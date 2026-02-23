@@ -1,0 +1,128 @@
+version: '3.8'
+
+services:
+  # ── Infrastructure ─────────────────────────────────────────────────────────
+  db:
+    image: postgres:15-alpine
+    container_name: risk_profile_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: risk_profile_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: risk_profile_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command: redis-server --appendonly yes
+
+  # ── Application ────────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: risk_profile_api
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/risk_profile_db
+      SECRET_KEY: dev-secret-key-change-in-production
+      API_V1_STR: /api/v1
+      PROJECT_NAME: Risk Profile Navigator API
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ── Celery Worker ──────────────────────────────────────────────────────────
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: risk_profile_worker
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/risk_profile_db
+      SECRET_KEY: dev-secret-key-change-in-production
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app
+    command: >
+      celery -A app.celery_app worker
+        --loglevel=info
+        --concurrency=4
+        --queues=celery
+        --hostname=worker@%h
+    restart: unless-stopped
+
+  # ── Celery Beat (scheduler) ────────────────────────────────────────────────
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: risk_profile_beat
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@db:5432/risk_profile_db
+      SECRET_KEY: dev-secret-key-change-in-production
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./app:/app/app
+      - beat_schedule:/app/beat
+    working_dir: /app
+    command: >
+      celery -A app.celery_app beat
+        --loglevel=info
+        --scheduler celery.beat.PersistentScheduler
+        --schedule /app/beat/celerybeat-schedule
+    restart: unless-stopped
+
+  # ── Flower (optional monitoring UI) ───────────────────────────────────────
+  flower:
+    image: mher/flower:2.0
+    container_name: risk_profile_flower
+    environment:
+      CELERY_BROKER_URL: redis://redis:6379/0
+      FLOWER_PORT: 5555
+    ports:
+      - "5555:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  beat_schedule:
